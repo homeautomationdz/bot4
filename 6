@@ -1,0 +1,71 @@
+import ccxt
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import asyncio
+from telegram import Bot
+from telegram.error import TelegramError
+
+def fetch_binance_data(symbol, timeframe='1h', limit=100):
+    try:
+        binance = ccxt.binance()
+        ohlcv = binance.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+        return data
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return pd.DataFrame()
+
+def calculate_trendline(data, column='close'):
+    x = np.arange(len(data))
+    y = data[column].values
+    fit = np.polyfit(x, y, 1)
+    trendline = np.polyval(fit, x)
+    return trendline
+
+def detect_breakout(data, trendline):
+    breakout = data[data['close'] > trendline]
+    return breakout
+
+def plot_trendline(data, trendline, breakout, filename='trendline_breakout.png'):
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['timestamp'], data['close'], label='Close Price')
+    plt.plot(data['timestamp'], trendline, label='Trendline', linestyle='--')
+    plt.scatter(breakout['timestamp'], breakout['close'], color='red', label='Breakout Points')
+    plt.xlabel('Timestamp')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.title('Trendline Breakout Detection')
+    plt.savefig(filename)
+    plt.show()
+
+async def send_image_to_telegram(filename, token, chat_id):
+    bot = Bot(token=token)
+    try:
+        with open(filename, 'rb') as photo:
+            await bot.send_photo(chat_id=chat_id, photo=photo)
+    except TelegramError as e:
+        print(f"Error sending image to Telegram: {e}")
+
+def main():
+    symbol = 'BTC/USDT'
+    timeframe = '1h'
+    token = '7413769690:AAFNIFhwa6qb7LIu0ciApOtYJPfI3cXWcE0'  # Hard-coded token
+    chat_id = '1385370555'  # Hard-coded chat ID
+    
+    data = fetch_binance_data(symbol, timeframe)
+    if data.empty:
+        print("No data fetched.")
+        return
+
+    trendline = calculate_trendline(data)
+    breakout = detect_breakout(data, trendline)
+    filename = 'trendline_breakout.png'
+    plot_trendline(data, trendline, breakout, filename)
+    
+    # Run the async function using asyncio
+    asyncio.run(send_image_to_telegram(filename, token, chat_id))
+
+if __name__ == "__main__":
+    main()

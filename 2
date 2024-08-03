@@ -1,0 +1,131 @@
+import ccxt
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import asyncio
+from telegram import Bot
+from telegram.error import TelegramError
+from scipy.signal import argrelextrema
+import config
+from datetime import datetime, timedelta, timezone
+
+# Global dictionary to store the last alert timestamp for each symbol
+previous_alerts = {}
+
+# Cooldown period in hours (e.g., 24 hours)
+ALERT_COOLDOWN_HOURS = 1
+
+def fetch_binance_data(symbol, timeframe='1m', limit=100):
+    try:
+        binance = ccxt.binance()
+        ohlcv = binance.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+        return data
+    except Exception as e:
+        print(f"Error fetching data for {symbol}: {e}")
+        return pd.DataFrame()
+
+def calculate_trendlines(data, ignore_last=5):
+    data['high'] = data['high'].astype(float)
+    data['low'] = data['low'].astype(float)
+
+    window_size = 10
+    valid_data = data.iloc[:-ignore_last].copy()  # Ignore the last few candles and create a copy
+    valid_data['peaks'] = valid_data.iloc[argrelextrema(valid_data['high'].values, np.greater_equal, order=window_size)[0]]['high']
+    valid_data['troughs'] = valid_data.iloc[argrelextrema(valid_data['low'].values, np.less_equal, order=window_size)[0]]['low']
+
+    peaks = valid_data.dropna(subset=['peaks'])
+    troughs = valid_data.dropna(subset=['troughs'])  # Corrected this line
+
+    if len(peaks) < 2 or len(troughs) < 2:
+        return None, None
+
+    x_peaks = peaks.index.values[-2:]
+    y_peaks = peaks['peaks'].values[-2:]
+    fit_peaks = np.polyfit(x_peaks, y_peaks, 1)
+    trendline_peaks = np.polyval(fit_peaks, np.arange(len(data)))
+
+    x_troughs = troughs.index.values[-2:]
+    y_troughs = troughs['troughs'].values[-2:]
+    fit_troughs = np.polyfit(x_troughs, y_troughs, 1)
+    trendline_troughs = np.polyval(fit_troughs, np.arange(len(data)))
+
+    return trendline_peaks, trendline_troughs
+
+def detect_breakout_breakdown(data, trendline_peaks, trendline_troughs):
+    breakout_indices = data[data['close'] > trendline_peaks].index
+    breakdown_indices = data[data['close'] < trendline_troughs].index
+    touching_indices = data[(data['close'] == trendline_peaks) | (data['close'] == trendline_troughs)].index
+    return breakout_indices, breakdown_indices, touching_indices
+
+def plot_trendlines(data, trendline_peaks, trendline_troughs, breakout_indices, breakdown_indices, touching_indices, symbol, filename):
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['timestamp'], data['close'], label='Close Price')
+    plt.plot(data['timestamp'], trendline_peaks, label='Resistance Trendline', linestyle='--', color='red')
+    plt.plot(data['timestamp'], trendline_troughs, label='Support Trendline', linestyle='--', color='green')
+    plt.scatter(data.loc[breakout_indices]['timestamp'], data.loc[breakout_indices]['close'], color='blue', label='Breakout Points')
+    plt.scatter(data.loc[breakdown_indices]['timestamp'], data.loc[breakdown_indices]['close'], color='orange', label='Breakdown Points')
+    plt.scatter(data.loc[touching_indices]['timestamp'], data.loc[touching_indices]['close'], color='purple', label='Touch Points')
+    plt.xlabel('Timestamp')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.title(f'Triangle Breakout/Breakdown Detection for {symbol}')
+    plt.savefig(filename)
+    plt.close()
+
+async def send_image_to_telegram(filename, token, chat_id):
+    bot = Bot(token=token)
+    try:
+        with open(filename, 'rb') as photo:
+            await bot.send_photo(chat_id=chat_id, photo=photo)
+    except TelegramError as e:
+        print(f"Error sending image to Telegram: {e}")
+
+async def check_for_breakouts_and_breakdowns(symbol, timeframe, token, chat_id):
+    global previous_alerts
+
+    data = fetch_binance_data(symbol, timeframe)
+    if data.empty:
+        print(f"No data fetched for {symbol}.")
+        return
+
+    trendline_peaks, trendline_troughs = calculate_trendlines(data)
+    if trendline_peaks is None or trendline_troughs is None:
+        print(f"Not enough data to calculate trendlines for {symbol}.")
+        return
+
+    breakout_indices, breakdown_indices, touching_indices = detect_breakout_breakdown(data, trendline_peaks, trendline_troughs)
+    
+    last_index = len(data) - 1
+    now = datetime.now(timezone.utc)
+
+    if (not breakout_indices.empty and breakout_indices[-1] == last_index) or \
+       (not breakdown_indices.empty and breakdown_indices[-1] == last_index) or \
+       (not touching_indices.empty and touching_indices[-1] == last_index):
+
+        if symbol not in previous_alerts or (now - previous_alerts[symbol]).total_seconds() > ALERT_COOLDOWN_HOURS * 3600:
+            previous_alerts[symbol] = now
+            filename = f'triangle_breakout_breakdown_{symbol.replace("/", "_")}.png'
+            plot_trendlines(data, trendline_peaks, trendline_troughs, breakout_indices, breakdown_indices, touching_indices, symbol, filename)
+            await send_image_to_telegram(filename, token, chat_id)
+
+async def main():
+    symbols = ['BTC/USDT', 'ETH/USDT', 'AAVE/USDT', 'ACE/USDT', 'ACH/USDT', 'ADA/USDT', 'AEVO/USDT',
+               'AGLD/USDT', 'ALGO/USDT', 'ALICE/USDT', 'ALPHA/USDT', 'ALT/USDT', 'AMB/USDT', 'APT/USDT',
+               'ARB/USDT', 'ARK/USDT', 'ARPA/USDT', 'AR/USDT', 'ASTR/USDT', 'ATA/USDT', 'ATOM/USDT',
+               'AUCTION/USDT', 'AVAX/USDT', 'AXL/USDT', 'AXS/USDT', 'BADGER/USDT', 'BAKE/USDT', 'BAL/USDT',
+               'BAND/USDT', 'BAT/USDT', 'BB/USDT']  # List of symbols
+    timeframe = '1m'
+    token = config.TELEGRAM_BOT_TOKEN
+    chat_id = config.TELEGRAM_CHAT_ID
+
+    while True:
+        print("Checking for breakouts and breakdowns...")
+        tasks = [check_for_breakouts_and_breakdowns(symbol, timeframe, token, chat_id) for symbol in symbols]
+        await asyncio.gather(*tasks)
+        print("Sleeping for 5 minutes...")
+        await asyncio.sleep(300)  # Sleep for 5 minutes before checking again
+
+if __name__ == "__main__":
+    asyncio.run(main())

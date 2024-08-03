@@ -1,0 +1,126 @@
+import ccxt
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import asyncio
+from telegram import Bot
+from telegram.error import TelegramError
+
+def fetch_binance_data(symbol, timeframe='1h', limit=100):
+    try:
+        binance = ccxt.binance()
+        ohlcv = binance.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+        return data
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return pd.DataFrame()
+
+def identify_triangle_points(data, column='close'):
+    highs = data[column] > data[column].shift(1)
+    lows = data[column] < data[column].shift(1)
+    
+    significant_highs = data[highs & (data[column] > data[column].shift(-1))]
+    significant_lows = data[lows & (data[column] < data[column].shift(-1))]
+    
+    significant_points = pd.concat([significant_highs, significant_lows])
+    significant_points = significant_points.sort_index()
+    
+    return significant_points
+
+def draw_triangle_lines(data, points):
+    trendlines = []
+    # Ensure points are enough to form triangles
+    if len(points) < 3:
+        return trendlines
+    
+    # Select every third point for triangles
+    for i in range(0, len(points) - 2, 3):
+        if i + 2 < len(points):
+            p1 = points.iloc[i]
+            p2 = points.iloc[i + 1]
+            p3 = points.iloc[i + 2]
+            trendlines.append((p1, p2))
+            trendlines.append((p2, p3))
+            trendlines.append((p3, p1))
+    return trendlines
+
+def detect_breakout_breakdown(data, trendlines, breakout_threshold=0.02, breakdown_threshold=0.02):
+    breakout_points = []
+    breakdown_points = []
+    
+    for (p1, p2) in trendlines:
+        # Create a linear trendline between p1 and p2
+        x = [data.index.get_loc(p1.name), data.index.get_loc(p2.name)]
+        y = [p1['close'], p2['close']]
+        trendline = np.interp(np.arange(len(data)), x, y)
+        
+        breakout = data[data['close'] > trendline * (1 + breakout_threshold)]
+        breakdown = data[data['close'] < trendline * (1 - breakdown_threshold)]
+        
+        breakout_points.append(breakout)
+        breakdown_points.append(breakdown)
+    
+    return breakout_points, breakdown_points
+
+def plot_triangles(data, trendlines, breakout_points, breakdown_points, filename='triangles_breakout.png'):
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['timestamp'], data['close'], label='Close Price')
+    
+    # Plot each triangle
+    for (p1, p2) in trendlines:
+        plt.plot([data['timestamp'].iloc[data.index.get_loc(p1.name)],
+                  data['timestamp'].iloc[data.index.get_loc(p2.name))],
+                 [data['close'].iloc[data.index.get_loc(p1.name)],
+                  data['close'].iloc[data.index.get_loc(p2.name))],
+                 linestyle='--', color='blue')
+    
+    # Plot breakout and breakdown points
+    colors = ['green', 'red']
+    for i, (breakout, breakdown) in enumerate(zip(breakout_points, breakdown_points)):
+        plt.scatter(breakout['timestamp'], breakout['close'], color=colors[i % len(colors)], label=f'Breakout Points {i+1}')
+        plt.scatter(breakdown['timestamp'], breakdown['close'], color=colors[i % len(colors)], marker='x', label=f'Breakdown Points {i+1}')
+    
+    plt.xlabel('Timestamp')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.title('Triangles with Breakout and Breakdown Detection')
+    plt.savefig(filename)
+    plt.show()
+
+async def send_image_to_telegram(filename, token, chat_id):
+    bot = Bot(token=token)
+    try:
+        with open(filename, 'rb') as photo:
+            await bot.send_photo(chat_id=chat_id, photo=photo)
+    except TelegramError as e:
+        print(f"Error sending image to Telegram: {e}")
+
+def main():
+    symbol = 'BTC/USDT'
+    timeframe = '1h'
+    token = '7124807761:AAFeEIuLTN1VzLyunmVU4m-uEcLhaRQLN_Y'  # Hard-coded token
+    chat_id = '1385370555'  # Hard-coded chat ID
+    
+    data = fetch_binance_data(symbol, timeframe)
+    if data.empty:
+        print("No data fetched.")
+        return
+
+    significant_points = identify_triangle_points(data)
+    
+    if len(significant_points) < 3:
+        print("Not enough significant points to create triangles.")
+        return
+    
+    trendlines = draw_triangle_lines(data, significant_points)
+    breakout_points, breakdown_points = detect_breakout_breakdown(data, trendlines)
+    filename = 'triangles_breakout.png'
+    plot_triangles(data, trendlines, breakout_points, breakdown_points, filename)
+    
+    # Run the async function using asyncio
+    asyncio.run(send_image_to_telegram(filename, token, chat_id))
+
+if __name__ == "__main__":
+    main()

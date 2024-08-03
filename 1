@@ -1,0 +1,45 @@
+import ccxt
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import datetime
+
+def fetch_binance_data(symbol, timeframe='1h', limit=100):
+    binance = ccxt.binance()
+    ohlcv = binance.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+    return data
+
+def calculate_trendline(data, column='close'):
+    x = np.arange(len(data))
+    y = data[column].values
+    fit = np.polyfit(x, y, 1)
+    trendline = np.polyval(fit, x)
+    return trendline
+
+def detect_breakout(data, trendline):
+    breakout = data[data['close'] > trendline]
+    return breakout
+
+def plot_trendline(data, trendline, breakout):
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['timestamp'], data['close'], label='Close Price')
+    plt.plot(data['timestamp'], trendline, label='Trendline', linestyle='--')
+    plt.scatter(breakout['timestamp'], breakout['close'], color='red', label='Breakout Points')
+    plt.xlabel('Timestamp')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.title('Trendline Breakout Detection')
+    plt.show()
+
+def main():
+    symbol = 'BTC/USDT'
+    timeframe = '1h'
+    data = fetch_binance_data(symbol, timeframe)
+    trendline = calculate_trendline(data)
+    breakout = detect_breakout(data, trendline)
+    plot_trendline(data, trendline, breakout)
+
+if __name__ == "__main__":
+    main()

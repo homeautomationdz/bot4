@@ -1,0 +1,122 @@
+import ccxt
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.signal import argrelextrema
+from telegram import Bot
+from telegram.error import TelegramError
+import asyncio
+
+def fetch_binance_data(symbol, timeframe='1h', limit=100):
+    try:
+        binance = ccxt.binance()
+        ohlcv = binance.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+        return data
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return pd.DataFrame()
+
+def calculate_slopes(data, length, mult, calcMethod):
+    if calcMethod == 'Atr':
+        slope = data['close'].rolling(window=length).apply(lambda x: np.mean(np.abs(np.diff(x)))) / length * mult
+    elif calcMethod == 'Stdev':
+        slope = data['close'].rolling(window=length).std() / length * mult
+    elif calcMethod == 'Linreg':
+        n = np.arange(length)
+        slope = data['close'].rolling(window=length).apply(lambda x: np.polyfit(n, x, 1)[0]) * mult
+    else:
+        raise ValueError("Invalid calculation method")
+    
+    return slope
+
+def calculate_trendlines(data, length, mult, calcMethod):
+    slope = calculate_slopes(data, length, mult, calcMethod)
+    
+    # Find peaks and troughs
+    window_size = length
+    peaks = data.iloc[argrelextrema(data['high'].values, np.greater_equal, order=window_size)[0]]
+    troughs = data.iloc[argrelextrema(data['low'].values, np.less_equal, order=window_size)[0]]
+
+    if len(peaks) < 2 or len(troughs) < 2:
+        return None, None
+
+    # Initialize trendlines
+    trendline_peaks = np.full(len(data), np.nan)
+    trendline_troughs = np.full(len(data), np.nan)
+
+    for i in range(len(data)):
+        if len(peaks) > 1:
+            trendline_peaks[i] = peaks['high'].iloc[-1] - slope.iloc[i]
+        if len(troughs) > 1:
+            trendline_troughs[i] = troughs['low'].iloc[-1] + slope.iloc[i]
+
+    return trendline_peaks, trendline_troughs
+
+def detect_breakouts(data, trendline_peaks, trendline_troughs):
+    breakout_up = data[data['close'] > trendline_peaks]
+    breakout_down = data[data['close'] < trendline_troughs]
+    return breakout_up, breakout_down
+
+def plot_trendlines(data, trendline_peaks, trendline_troughs, breakout_up, breakout_down, filename='triangle_breakout.png'):
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['timestamp'], data['close'], label='Close Price')
+    
+    # Plot support and resistance lines
+    plt.plot(data['timestamp'], trendline_peaks, label='Resistance Trendline', linestyle='--', color='red')
+    plt.plot(data['timestamp'], trendline_troughs, label='Support Trendline', linestyle='--', color='green')
+    
+    # Plot breakout points
+    plt.scatter(breakout_up['timestamp'], breakout_up['close'], color='blue', label='Breakout Up Points')
+    plt.scatter(breakout_down['timestamp'], breakout_down['close'], color='orange', label='Breakout Down Points')
+
+    # Extend the trendlines
+    last_idx = len(data) - 1
+    future_dates = pd.date_range(start=data['timestamp'].iloc[-1], periods=50, freq='H')
+    plt.plot(future_dates, trendline_peaks[-1] + np.arange(1, 51) * (trendline_peaks[-1] - trendline_peaks[-2]), linestyle='--', color='red')
+    plt.plot(future_dates, trendline_troughs[-1] + np.arange(1, 51) * (trendline_troughs[-1] - trendline_troughs[-2]), linestyle='--', color='green')
+
+    plt.xlabel('Timestamp')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.title('Trendline Breakout Detection')
+    plt.savefig(filename)
+    plt.show()
+
+async def send_image_to_telegram(filename, token, chat_id):
+    bot = Bot(token=token)
+    try:
+        with open(filename, 'rb') as photo:
+            await bot.send_photo(chat_id=chat_id, photo=photo)
+    except TelegramError as e:
+        print(f"Error sending image to Telegram: {e}")
+
+def main():
+    symbol = 'BTC/USDT'
+    timeframe = '1h'
+    length = 14
+    mult = 1.0
+    calcMethod = 'Atr'
+    token = '7124807761:AAFeEIuLTN1VzLyunmVU4m-uEcLhaRQLN_Y'  # Hard-coded token
+    chat_id = '1385370555'  # Hard-coded chat ID
+    
+    data = fetch_binance_data(symbol, timeframe)
+    if data.empty:
+        print("No data fetched.")
+        return
+
+    trendline_peaks, trendline_troughs = calculate_trendlines(data, length, mult, calcMethod)
+    if trendline_peaks is None or trendline_troughs is None:
+        print("Not enough data to calculate trendlines.")
+        return
+
+    breakout_up, breakout_down = detect_breakouts(data, trendline_peaks, trendline_troughs)
+    filename = 'triangle_breakout.png'
+    plot_trendlines(data, trendline_peaks, trendline_troughs, breakout_up, breakout_down, filename)
+    
+    # Run the async function using asyncio
+    asyncio.run(send_image_to_telegram(filename, token, chat_id))
+
+if __name__ == "__main__":
+    main()
