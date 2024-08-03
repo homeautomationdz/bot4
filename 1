@@ -1,14 +1,26 @@
-import ccxt
+from binance.client import Client
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import datetime
+import io
+import asyncio
+from telegram import Bot
+from telegram.error import TelegramError
+import config
 
 def fetch_binance_data(symbol, timeframe='1h', limit=100):
-    binance = ccxt.binance()
-    ohlcv = binance.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    client = Client(config.api_key, config.api_secret)
+    klines = client.get_klines(symbol=symbol, interval=timeframe, limit=limit)
+    data = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
+    
+    # Convert timestamp and financial columns to appropriate types
     data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+    data['close'] = data['close'].astype(float)  # Ensure 'close' is float
+    data['open'] = data['open'].astype(float)    # Ensure 'open' is float
+    data['high'] = data['high'].astype(float)    # Ensure 'high' is float
+    data['low'] = data['low'].astype(float)      # Ensure 'low' is float
+    data['volume'] = data['volume'].astype(float) # Ensure 'volume' is float
+    
     return data
 
 def calculate_trendline(data, column='close'):
@@ -22,7 +34,19 @@ def detect_breakout(data, trendline):
     breakout = data[data['close'] > trendline]
     return breakout
 
-def plot_trendline(data, trendline, breakout):
+async def send_plot_to_telegram(plot, token, chat_id):
+    bot = Bot(token=token)
+    buf = io.BytesIO()
+    plot.savefig(buf, format='png')
+    buf.seek(0)  # Move to the beginning of the BytesIO buffer
+    try:
+        await bot.send_photo(chat_id=chat_id, photo=buf)
+    except TelegramError as e:
+        print(f"Error sending image to Telegram: {e}")
+    finally:
+        plt.close()
+
+def plot_trendline(data, trendline, breakout, symbol, timeframe):
     plt.figure(figsize=(12, 6))
     plt.plot(data['timestamp'], data['close'], label='Close Price')
     plt.plot(data['timestamp'], trendline, label='Trendline', linestyle='--')
@@ -30,16 +54,17 @@ def plot_trendline(data, trendline, breakout):
     plt.xlabel('Timestamp')
     plt.ylabel('Price')
     plt.legend()
-    plt.title('Trendline Breakout Detection')
-    plt.show()
+    plt.title(f'Trendline Breakout Detection for {symbol} ({timeframe})')  # Include the timeframe in the title
+    return plt
 
-def main():
-    symbol = 'BTC/USDT'
+async def main():
+    symbol = 'BTCUSDT'
     timeframe = '1h'
     data = fetch_binance_data(symbol, timeframe)
     trendline = calculate_trendline(data)
     breakout = detect_breakout(data, trendline)
-    plot_trendline(data, trendline, breakout)
+    plot = plot_trendline(data, trendline, breakout, symbol, timeframe)
+    await send_plot_to_telegram(plot, config.bot_token, config.chat_id)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
