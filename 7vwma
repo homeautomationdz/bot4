@@ -1,17 +1,24 @@
-import ccxt
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import asyncio
+from scipy.signal import argrelextrema
 from telegram import Bot
 from telegram.error import TelegramError
+import asyncio
+import io  # Import io for in-memory file handling
+from binance.client import Client  # Import Binance Client
+import config7  # Import the configuration file
 
-def fetch_binance_data(symbol, timeframe='1m', limit=100):
+def fetch_binance_data(symbol, timeframe='30m', limit=100):
     try:
-        binance = ccxt.binance()
-        ohlcv = binance.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        client = Client(config7.api_key, config7.api_secret)  # Use the API key and secret from config7.py
+        ohlcv = client.get_historical_klines(symbol, timeframe, limit=limit)
+        data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume',
+                                              'close_time', 'quote_asset_volume', 'number_of_trades',
+                                              'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
         data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+        data['close'] = pd.to_numeric(data['close'], errors='coerce')  # Convert 'close' to numeric
+        data['volume'] = pd.to_numeric(data['volume'], errors='coerce')  # Convert 'volume' to numeric
         return data
     except Exception as e:
         print(f"Error fetching data for {symbol}: {e}")
@@ -31,7 +38,7 @@ def detect_vwma_cross(data, short_period, long_period):
     
     return crossovers, crossdowns
 
-def plot_vwma(data, crossovers, crossdowns, symbol, filename):
+def plot_vwma(data, crossovers, crossdowns, symbol, timeframe):
     plt.figure(figsize=(12, 6))
     plt.plot(data['timestamp'], data['close'], label='Close Price')
     plt.plot(data['timestamp'], data['vwma_short'], label='Short-term VWMA', linestyle='--', color='orange')
@@ -41,15 +48,19 @@ def plot_vwma(data, crossovers, crossdowns, symbol, filename):
     plt.xlabel('Timestamp')
     plt.ylabel('Price')
     plt.legend()
-    plt.title(f'VWMA Crossover and Crossdown Detection for {symbol}')
-    plt.savefig(filename)
-    plt.close()
+    plt.title(f'VWMA Crossover and Crossdown Detection for {symbol} ({timeframe})')
 
-async def send_image_to_telegram(filename, token, chat_id):
+    # Save the plot to a BytesIO object
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)  # Move to the beginning of the BytesIO buffer
+    plt.close()  # Close the figure to free up memory
+    return buf  # Return the buffer
+
+async def send_image_to_telegram(image_buffer, token, chat_id):
     bot = Bot(token=token)
     try:
-        with open(filename, 'rb') as photo:
-            await bot.send_photo(chat_id=chat_id, photo=photo)
+        await bot.send_photo(chat_id=chat_id, photo=image_buffer)
     except TelegramError as e:
         print(f"Error sending image to Telegram: {e}")
 
@@ -60,33 +71,30 @@ async def process_symbol(symbol, timeframe, short_period, long_period, token, ch
         return
 
     crossovers, crossdowns = detect_vwma_cross(data, short_period, long_period)
-    if not crossovers.empty or not crossdowns.empty:
-        most_recent_crossover = crossovers.iloc[-1] if not crossovers.empty else None
-        most_recent_crossdown = crossdowns.iloc[-1] if not crossdowns.empty else None
-        
-        most_recent_time = data.iloc[-1]['timestamp']
-        
-        recent_crossover = most_recent_crossover and most_recent_crossover['timestamp'] == most_recent_time
-        recent_crossdown = most_recent_crossdown and most_recent_crossdown['timestamp'] == most_recent_time
-        
-        if recent_crossover or recent_crossdown:
-            filename = f'{symbol.replace("/", "_")}_vwma_crossover_crossdown.png'
-            plot_vwma(data, crossovers, crossdowns, symbol, filename)
-            await send_image_to_telegram(filename, token, chat_id)
-        else:
-            print(f"No recent crossovers or crossdowns detected for {symbol}.")
-    else:
+    
+    # Check if crossovers and crossdowns are empty
+    if crossovers.empty and crossdowns.empty:
         print(f"No crossovers or crossdowns detected for {symbol}.")
+        return
+
+    most_recent_crossover = crossovers.iloc[-1] if not crossovers.empty else None
+    most_recent_crossdown = crossdowns.iloc[-1] if not crossdowns.empty else None
+    most_recent_time = data.iloc[-1]['timestamp']
+    
+    recent_crossover = most_recent_crossover is not None and most_recent_crossover['timestamp'] == most_recent_time
+    recent_crossdown = most_recent_crossdown is not None and most_recent_crossdown['timestamp'] == most_recent_time
+
+    if recent_crossover or recent_crossdown:
+        image_buffer = plot_vwma(data, crossovers, crossdowns, symbol, timeframe)
+        await send_image_to_telegram(image_buffer, token, chat_id)
+    else:
+        print(f"No recent crossovers or crossdowns detected for {symbol}.")
 
 async def main():
-    symbols = [
-        'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'XRP/USDT', 'ADA/USDT', 'SOL/USDT', 
-        'DOGE/USDT', 'DOT/USDT', 'UNI/USDT', 'LTC/USDT', 'LINK/USDT', 'BCH/USDT',
-        'MATIC/USDT', 'XLM/USDT', 'ATOM/USDT', 'ETC/USDT', 'FIL/USDT', 'VET/USDT'
-    ]  # Add more pairs as needed
-    timeframe = '1m'
-    token = '7124807761:AAFeEIuLTN1VzLyunmVU4m-uEcLhaRQLN_Y'  # Replace with your actual token
-    chat_id = '1385370555'  # Replace with your actual chat ID
+    symbols = config7.SELECTED_SYMBOLS  # Get symbols from config7.py
+    timeframe = '30m'
+    token = config7.bot_token  # Use the token from config7.py
+    chat_id = config7.chat_id  # Use the chat ID from config7.py
 
     short_period = 20
     long_period = 50
